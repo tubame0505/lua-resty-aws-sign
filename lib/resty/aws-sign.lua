@@ -37,8 +37,9 @@ local function sha256_digest_str(s)
     return str.to_hex(h:final())
 end
 
-local function get_headers(creds, host, timestamp)
+local function get_headers(creds, host, body_digest, timestamp)
     local headers_str = 'host:' .. host .. '\n'
+    .. 'x-amz-content-sha256:' .. body_digest .. '\n'
     .. 'x-amz-date:' .. get_iso8601_basic(timestamp)
     if creds['token'] ~= nil and creds['token'] ~= '' then
         headers_str = headers_str .. '\n'
@@ -49,9 +50,9 @@ end
 
 local function get_signed_headers(creds, host, timestamp)
     if creds['token'] ~= nil and creds['token'] ~= '' then
-        return 'host;x-amz-date;x-amz-security-token'
+        return 'host;x-amz-content-sha256;x-amz-date;x-amz-security-token'
     end
-    return 'host;x-amz-date'
+    return 'host;x-amz-content-sha256;x-amz-date'
 end
 
 local function get_creds_scope(creds, timestamp, service)
@@ -63,12 +64,11 @@ end
 
 
 -- generate canonicalrequest hash, QueryString is not implemented.
-local function get_canonicalrequest_hash(creds, timestamp, host, uri, canonical_query_string, request_method, request_body)
-    local body_digest = sha256_digest_str(request_body)
+local function get_canonicalrequest_hash(creds, timestamp, host, uri, canonical_query_string, request_method, body_digest)
     local request_str = request_method .. '\n'
       .. uri .. '\n'
       .. canonical_query_string .. '\n'
-      .. get_headers(creds, host, timestamp) .. '\n\n'
+      .. get_headers(creds, host, body_digest, timestamp) .. '\n\n'
       .. get_signed_headers(creds, host, timestamp) .. '\n'
       .. body_digest
     -- ngx.log(ngx.ERR, "canonical_str:" .. request_str .. "\n")
@@ -76,11 +76,11 @@ local function get_canonicalrequest_hash(creds, timestamp, host, uri, canonical_
 end
 
 -- generate string to sign
-local function get_string_to_sign(creds, timestamp, host, uri, service, canonical_query_string, request_method, request_body)
+local function get_string_to_sign(creds, timestamp, host, uri, service, canonical_query_string, request_method, body_digest)
     return 'AWS4-HMAC-SHA256\n'
       .. get_iso8601_basic(timestamp) .. '\n'
       .. get_creds_scope(creds, timestamp, service) .. '\n'
-      .. get_canonicalrequest_hash(creds, timestamp, host, uri, canonical_query_string, request_method, request_body)
+      .. get_canonicalrequest_hash(creds, timestamp, host, uri, canonical_query_string, request_method, body_digest)
 end
 
 -- generate sign key
@@ -106,9 +106,10 @@ end
 local function _aws_get_headers(timestamp, host, uri, service, canonical_query_string, request_method, _request_body)
     local query_string = canonical_query_string or ''
     local request_body = _request_body or ''
+    local body_digest = sha256_digest_str(request_body)
     local creds = get_credentials()
     local sign_key = get_sign_key(creds, timestamp, service)
-    local string_to_sign = get_string_to_sign(creds, timestamp, host, uri, service, query_string, request_method, request_body)
+    local string_to_sign = get_string_to_sign(creds, timestamp, host, uri, service, query_string, request_method, body_digest)
     local signature_str = get_signature_str(sign_key, string_to_sign)
     local authorization = 'AWS4-HMAC-SHA256 '
       .. 'Credential=' .. creds['access_key'] .. '/' .. get_creds_scope(creds, timestamp, service)
@@ -117,6 +118,7 @@ local function _aws_get_headers(timestamp, host, uri, service, canonical_query_s
     return {
       authorization = authorization,
       host = host,
+      amzcontentsha = body_digest,
       amzdate = get_iso8601_basic(timestamp),
       token = creds['token']
     }
@@ -131,6 +133,7 @@ function _M.aws_set_headers(timestamp, host, uri, service, canonical_query_strin
     local auth = _aws_get_headers(timestamp, host, uri, service, canonical_query_string, request_method, request_body)
     ngx.req.set_header('Authorization', auth['authorization'])
     ngx.req.set_header('Host', auth['host'])
+    ngx.req.set_header('x-amz-content-sha256', auth['amzcontentsha'])
     ngx.req.set_header('X-Amz-Date', auth['amzdate'])
     if auth['token'] ~= nil and auth['token'] ~= '' then
         ngx.req.set_header('X-Amz-Security-Token', auth['token'])
